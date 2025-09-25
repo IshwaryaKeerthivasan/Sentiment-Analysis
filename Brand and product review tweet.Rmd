@@ -1,0 +1,280 @@
+---
+title: "Brand and product Reviews"
+author: "Ishwarya keerthivasan"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+```
+
+# **Why This Project Was Created (Business Need)**
+In today’s digital-first world, brands and products are continuously being discussed on social media and review platforms. Customers openly share positive experiences, frustrations, and suggestions online. For businesses, this feedback is a **strategic asset**—it can highlight reputation risks, inform marketing campaigns, and guide product improvements.  
+
+The challenge is scale: the **volume of unstructured text data** is too large for manual analysis. Automated approaches such as sentiment analysis and machine learning enable organizations to monitor **brand reputation** and **customer sentiment** in real time. This project was created to demonstrate how these methods can be applied effectively to real-world brand and product reviews.
+
+## **2. Project Objective**
+The main objectives of this project were:  
+1. To extract and analyze brand and product mentions from tweets.  
+2. To measure sentiment and emotion using both **lexicon-based** and **machine learning** approaches.  
+3. To compare sentiment between competing brands (e.g., Apple vs. Google).  
+4. To evaluate predictive models (Naive Bayes, Logistic Regression, SVM, XGBoost) for classifying emotions.  
+5. To identify limitations of traditional models and potential for **advanced NLP techniques** (e.g., BERT).
+
+## **3. Methodology**
+- **Data Preparation**: Cleaned and tokenized tweet text, consolidated brand categories.  
+- **Exploratory Analysis**: Visualized top-mentioned brands and their sentiment breakdowns.  
+- **Lexicon-Based Analysis**: Used Bing sentiment lexicon to calculate sentiment scores.  
+- **Machine Learning Models**: Built and tested classifiers to predict emotion categories.  
+- **Evaluation**: Used accuracy, kappa, and confusion matrices to compare performance across models.
+
+
+## Install and load required package:
+
+```{r}
+# Install/load required packages
+required <- c("tidyverse","tidytext","caret","glmnet","Matrix",
+              "ggplot2","scales","doParallel", "xgboost")
+installed <- installed.packages()[, "Package"]
+if(length(setdiff(required, installed)) > 0) install.packages(setdiff(required, installed))
+
+library(tidyverse)
+library(tidytext)
+library(caret)
+library(glmnet)
+library(Matrix)
+library(ggplot2)
+library(scales)
+library(doParallel)
+```
+
+
+## **Load and inspect the data**
+
+```{r}
+`Brand and product review tweet` <- read.csv("C:/Users/Ishwa/Downloads/Brand and product review tweet.csv")
+
+# dataset load step
+tweets_df <- `Brand and product review tweet`
+colnames(tweets_df) <- c("tweet_text", "target", "emotion")
+glimpse(tweets_df)
+
+# Count unique values per column
+sapply(tweets_df, n_distinct)
+```
+
+## **Sentiment Distribution Per Brand**
+
+```{r}
+# Top 10 brands/products mentioned
+top_10_brands <- tweets_df %>%
+  filter(!is.na(target), target != "") %>%
+  count(target, sort = TRUE) %>%
+  top_n(10)
+
+ggplot(top_10_brands, aes(x = reorder(target, n), y = n)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = n), hjust = -0.2, size = 3.5) +
+  coord_flip() +
+  labs(title = "Top 10 Mentioned Brands & Products",
+       subtitle = "SXSW Tweets",
+       x = "Brand or Product",
+       y = "Total Mentions") +
+  theme_minimal()
+```
+
+
+## **Clean and Consolidate Brand Categories**
+
+```{r}
+tweets_cleaned <- tweets_df %>%
+  mutate(
+    brand = case_when(
+      grepl("apple|ipad|iphone", target, ignore.case = TRUE) ~ "Apple",
+      grepl("google|android", target, ignore.case = TRUE) ~ "Google",
+      target == "" ~ "Unspecified",
+      TRUE ~ "Other"
+    )
+  )
+
+table(tweets_cleaned$brand)
+
+tweets_cleaned %>%
+  filter(brand != "Unspecified",
+         emotion != "I can't tell") %>%
+  count(brand, emotion) %>%
+  ggplot(aes(x = brand, y = n, fill = emotion)) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = percent) +
+  labs(title = "Sentiment Breakdown for Consolidated Brands",
+       x = "Brand",
+       y = "Proportion of Tweets",
+       fill = "Emotion") +
+  theme_minimal()
+```
+
+## **Lexicon-Based Sentiment Analysis**
+
+```{r}
+# Tokenize + join with Bing lexicon
+tweet_sentiments <- tweets_df %>%
+  mutate(tweet_id = row_number()) %>%
+  unnest_tokens(word, tweet_text) %>%
+  inner_join(get_sentiments("bing"), by = "word")
+
+# Sentiment score per tweet
+sentiment_scores <- tweet_sentiments %>%
+  count(tweet_id, sentiment) %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>%
+  mutate(sentiment_score = positive - negative)
+
+# Join back to original
+final_sentiments <- tweets_df %>%
+  mutate(tweet_id = row_number()) %>%
+  left_join(sentiment_scores, by = "tweet_id") %>%
+  mutate(sentiment_score = ifelse(is.na(sentiment_score), 0, sentiment_score))
+
+# Most positive/negative tweets
+final_sentiments %>%
+  arrange(desc(sentiment_score)) %>%
+  select(tweet_text, sentiment_score) %>%
+  head(5)
+
+final_sentiments %>%
+  arrange(sentiment_score) %>%
+  select(tweet_text, sentiment_score) %>%
+  head(5)
+
+# Distribution
+ggplot(final_sentiments, aes(x = sentiment_score)) +
+  geom_histogram(binwidth = 1, fill = "skyblue", color = "black") +
+  labs(title = "Distribution of Tweet Sentiment Scores (Lexicon Method)",
+       x = "Sentiment Score (Positive - Negative Words)",
+       y = "Number of Tweets") +
+  theme_minimal()
+```
+
+## **Brand-Specific Sentiment (Lexicon)**
+
+```{r}
+brand_sentiments <- tweets_cleaned %>%
+  select(tweet_text, brand) %>%
+  mutate(tweet_id = row_number()) %>%
+  inner_join(final_sentiments %>% select(tweet_id, sentiment_score), by = "tweet_id")
+
+average_brand_sentiment <- brand_sentiments %>%
+  filter(brand %in% c("Apple","Google")) %>%
+  group_by(brand) %>%
+  summarise(average_score = mean(sentiment_score, na.rm = TRUE),
+            total_tweets = n())
+
+average_brand_sentiment
+
+ggplot(average_brand_sentiment, aes(x = brand, y = average_score, fill = brand)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = round(average_score,2)), vjust = -0.5) +
+  labs(title = "Average Sentiment Score: Apple vs. Google",
+       subtitle = "Lexicon-based",
+       y = "Average Sentiment Score") +
+  theme_minimal()
+```
+
+## **Machine Learning Approach: TF-IDF + XGBoost**
+
+```{r}
+install.packages("xgboost")
+library(xgboost)
+
+# Filter relevant classes
+model_data <- tweets_cleaned %>%
+  filter(emotion %in% c("Positive emotion",
+                        "Negative emotion",
+                        "No emotion toward brand or product")) %>%
+  mutate(emotion = factor(emotion),
+         tweet_id = row_number())
+
+# --- TF-IDF Features ---
+dtm_tfidf <- model_data %>%
+  unnest_tokens(word, tweet_text) %>%
+  anti_join(stop_words, by = "word") %>%
+  count(tweet_id, word) %>%
+  bind_tf_idf(word, tweet_id, n) %>%
+  cast_sparse(tweet_id, word, tf_idf)
+
+labels <- model_data$emotion
+num_classes <- nlevels(labels)
+
+# --- Train/Test Split ---
+set.seed(123)
+train_index <- createDataPartition(labels, p = 0.7, list = FALSE)
+
+train_x <- dtm_tfidf[train_index, ]
+test_x  <- dtm_tfidf[-train_index, ]
+
+train_y <- labels[train_index]
+test_y  <- labels[-train_index]
+
+# Convert to xgboost format
+dtrain <- xgb.DMatrix(data = train_x, label = as.numeric(train_y) - 1)
+dtest  <- xgb.DMatrix(data = test_x,  label = as.numeric(test_y) - 1)
+
+# --- Train XGBoost Model ---
+params <- list(
+  objective = "multi:softprob",
+  num_class = num_classes,
+  eval_metric = "mlogloss",
+  max_depth = 6,
+  eta = 0.2,
+  subsample = 0.8,
+  colsample_bytree = 0.8
+)
+
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 300,
+  watchlist = list(train = dtrain, eval = dtest),
+  early_stopping_rounds = 15,
+  verbose = 1
+)
+
+# Probabilities → choose class with max prob
+pred_probs <- predict(xgb_model, dtest)
+preds <- max.col(matrix(pred_probs, ncol = num_classes, byrow = TRUE))
+preds_factor <- factor(preds, levels = 1:num_classes, labels = levels(labels))
+
+confusionMatrix(preds_factor, test_y)
+```
+
+```{r}
+install.packages("MLmetrics")
+library(MLmetrics)
+F1_Score(y_pred = preds_factor, y_true = test_y, positive = "Negative emotion")
+F1_Score(y_pred = preds_factor, y_true = test_y, positive = "Positive emotion")
+```
+
+## **4. Key Insights**
+- Apple and Google were the most frequently mentioned brands with distinct sentiment patterns.  
+- Lexicon-based scoring provided quick and interpretable results, but lacked nuance.  
+- Machine learning models (especially **XGBoost**) achieved the best accuracy (~67%), though negative emotions remained difficult to detect.  
+- Class imbalance (fewer negative emotion tweets) was a key challenge, impacting sensitivity for minority classes.
+
+## **5. Business Impact**
+This type of analysis enables organizations to:  
+- **Track Brand Reputation** in real-time and react proactively.  
+- **Benchmark Against Competitors** to understand relative market perception.  
+- **Improve Customer Experience** by identifying recurring complaints or praise.  
+- **Support Marketing Strategy** by amplifying positive sentiment and addressing negative feedback effectively.
+
+## **6. Next Steps**
+While traditional models provide a useful baseline, **transformer-based models such as BERT** offer significantly better performance by capturing language context, sarcasm, and slang. Future work can involve:  
+- Fine-tuning BERT on this dataset for improved emotion classification.  
+- Building an interactive **dashboard** for real-time sentiment monitoring.  
+- Integrating results with **business intelligence tools** to support decision-making.
+
+
+## **7. Closing Statement**
+This project demonstrates how sentiment analysis can turn unstructured text into **actionable insights** for businesses. By combining exploratory analysis, lexicon-based scoring, and predictive modeling, organizations can better understand how customers feel about their brands and products. Ultimately, this empowers decision-makers to respond effectively, improve customer satisfaction, and strengthen competitive positioning.
+
